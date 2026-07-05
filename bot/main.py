@@ -21,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- UNIVERSAL CLOUD CONFIGURATIONS ---
-DB_PATH = "permits.db"  # Fixed path for Render cloud integration
+DB_PATH = "permits.db"  
 ADMIN_PASSCODE = "SemeraLogiya2026"
 
 # Conversation States
@@ -39,7 +39,6 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
-    """Starts a background thread to prevent Render from sleeping"""
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
@@ -63,7 +62,6 @@ def init_db():
             )
         ''')
         
-        # Migration Safety Checks
         cursor.execute("PRAGMA table_info(applications)")
         columns = [col[1] for col in cursor.fetchall()]
         if "phone_number" not in columns:
@@ -90,6 +88,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         parse_mode="Markdown"
     )
     return FULL_NAME
+
+async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    name_text = update.message.text.strip()
+    if not re.match(r"^[a-zA-Z\s]{3,60}$", name_text) or len(name_text.split()) < 2:
+        await update.message.reply_text("⚠️ Please enter a valid full name (Letters only):")
+        return FULL_NAME
+
+    context.user_data['full_name'] = name_text
+    await update.message.reply_text("Thank you. Now, please enter your **Phone Number** (e.g., 0911223344):")
+    return PHONE_NUMBER
 
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     name_text = update.message.text.strip()
@@ -154,7 +162,7 @@ async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         conn.close()
 
         if not rows:
-            await update.message.reply_text("📋 There are currently no applications pending review in the cloud database.")
+            await update.message.reply_text("📋 There are currently no applications pending review.")
             return
 
         board_text = (
@@ -216,10 +224,35 @@ async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.error(f"Admin view execution error: {e}")
         return ConversationHandler.END
 
+async def admin_intercept_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    status_choice = update.message.text.strip()
+    context.user_data['admin_selected_status'] = status_choice
+    
+    if status_choice == "Rejected":
+        await update.message.reply_text(
+            "⚠️ **Rejection Requirements:** You must provide engineering feedback detailing why this blueprint was rejected.\n\n"
+            "Please type your detailed rejection reason below and press Send:",
+            reply_markup=ReplyKeyboardRemove()
+        )
+    else:
+        await update.message.reply_text(
+            f"✍️ **Status captured: {status_choice}**\n\n"
+            "Please type your engineering comments or feedback for this decision below and press Send:",
+            reply_markup=ReplyKeyboardRemove()
+        )
+    return ADMIN_GET_COMMENTS
+
 async def admin_save_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     comments_text = update.message.text.strip()
     app_id = context.user_data.get('admin_target_id')
     new_status = context.user_data.get('admin_selected_status')
+
+    # Enforce mandatory comments for rejections
+    if new_status == "Rejected" and (not comments_text or len(comments_text) < 5):
+        await update.message.reply_text(
+            "❌ **Error:** Detailed comments are mandatory for rejections. Please type a valid explanation:"
+        )
+        return ADMIN_GET_COMMENTS
 
     try:
         conn = get_db_connection()
@@ -234,38 +267,34 @@ async def admin_save_decision(update: Update, context: ContextTypes.DEFAULT_TYPE
         row = cursor.fetchone()
         conn.close()
 
-        await update.message.reply_text(
-            f"✅ **Decision Locked.** Application #{app_id} marked as '{new_status}' with your comments recorded.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-
+        feedback_msg = f"✅ **Decision Locked.** Application #{app_id} marked as '{new_status}'."
+        
+        # User notification routine
+        notification_sent = False
         if row and row['user_id']:
             try:
                 await context.bot.send_message(
-                    chat_id=row['user_id'],
-                    text=f"🔔 **Municipality Notification Update:**\n\n"
-                         f"Your application status is now: *{new_status}*.\n"
-                         f"💬 **Engineer Remarks:** {comments_text}"
+                    chat_id=int(row['user_id']),
+                    text=f"🔔 **Semera Logiya Municipality Permit Update:**\n\n"
+                         f"Your permit application status has been changed to: **{new_status}**.\n\n"
+                         f"💬 **Official Engineer Remarks:**\n{comments_text}"
                 )
-            except Exception:
-                pass
-            
+                notification_sent = True
+            except Exception as notify_err:
+                logger.error(f"Could not message citizen directly: {notify_err}")
+
+        if notification_sent:
+            feedback_msg += "\n📱 The citizen has been notified directly on Telegram!"
+        else:
+            feedback_msg += "\n⚠️ Notice: Could not send direct notification. The user might have blocked the bot or the session was refreshed."
+
+        await update.message.reply_text(feedback_msg, reply_markup=ReplyKeyboardRemove())
         context.user_data.clear()
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Status comment write failure: {e}")
+        await update.message.reply_text(f"❌ Database error: {e}", reply_markup=ReplyKeyboardRemove())
         return ConversationHandler.END
-
-async def admin_intercept_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    status_choice = update.message.text.strip()
-    context.user_data['admin_selected_status'] = status_choice
-    
-    await update.message.reply_text(
-        f"✍️ **Status captured: {status_choice}**\n\n"
-        f"Please type your formal engineering comments/feedback for this decision below and press Send:",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return ADMIN_GET_COMMENTS
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
@@ -303,9 +332,10 @@ def main():
         per_user=True,
     )
 
+    # Priority routing setup
+    application.add_handler(CommandHandler("review", admin_review))
     application.add_handler(citizen_handler)
     application.add_handler(admin_handler)
-    application.add_handler(CommandHandler("review", admin_review))
 
     print("🚀 System Live with Web Heartbeat. Engine is securely looping...")
     application.run_polling()
