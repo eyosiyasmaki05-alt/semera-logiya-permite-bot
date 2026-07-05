@@ -61,11 +61,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return FULL_NAME
 
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # IMMUNITY GUARD: If admin is typing a comment, kick them out of the citizen flow immediately!
+    if context.user_data.get('admin_state') == 'WAITING_REJECTION_COMMENT':
+        await handle_global_text(update, context)
+        return ConversationHandler.END
+
     context.user_data['full_name'] = update.message.text
     await update.message.reply_text("Thank you. Now, please enter your **Phone Number**:")
     return PHONE_NUMBER
 
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if context.user_data.get('admin_state') == 'WAITING_REJECTION_COMMENT':
+        await handle_global_text(update, context)
+        return ConversationHandler.END
+
     context.user_data['phone'] = update.message.text
     await update.message.reply_text(
         "Perfect. Finally, please upload your **Structural Design Blueprint File** (PDF or image document):"
@@ -187,7 +196,6 @@ async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE)
     target_user = data_parts[3]
 
     if new_status == "Rejected":
-        # Lock user context state specifically to catch rejection reasons next
         context.user_data['admin_state'] = 'WAITING_REJECTION_COMMENT'
         context.user_data['handling_rejection_app_id'] = app_id
         context.user_data['handling_rejection_user_id'] = target_user
@@ -195,7 +203,6 @@ async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_caption(caption="⚠️ **Status set to Rejected.**\nNow, type the reason for rejection directly in this chat:")
         return
 
-    # Process approvals or under reviews instantly
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
     cursor.execute("UPDATE applications SET status = ?, admin_comments = 'None' WHERE id = ?", (new_status, app_id))
@@ -214,7 +221,6 @@ async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # --- GLOBAL TEXT INTERCEPTOR ROUTER ---
 async def handle_global_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check if this user is an admin typing an active rejection reason
     if context.user_data.get('admin_state') == 'WAITING_REJECTION_COMMENT':
         app_id = context.user_data.get('handling_rejection_app_id')
         target_user = context.user_data.get('handling_rejection_user_id')
@@ -226,7 +232,7 @@ async def handle_global_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         conn.commit()
         conn.close()
 
-        context.user_data.clear() # Clear state memory out immediately
+        context.user_data.clear() 
 
         await update.message.reply_text(f"✅ Rejection reason logged successfully for App #{app_id}.")
 
@@ -241,15 +247,14 @@ async def handle_global_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logger.error(f"Could not alert user: {e}")
         return
 
-    # If it's a standard text input with no context, reply instructions
-    await update.message.reply_text("Type `/start` to begin your permit application registration, or use an administrative passcode command.")
+    await update.message.reply_text("Type `/start` to begin your permit application registration.")
 
 # --- HANDLER ROUTING CONFIGURATION ---
 citizen_handler = ConversationHandler(
     entry_points=[CommandHandler("start", start)],
     states={
-        FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/(review|view)'), get_name)],
-        PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/(review|view)'), get_phone)],
+        FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
+        PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
         UPLOAD_FILE: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_file)],
     },
     fallbacks=[CommandHandler("cancel", cancel)],
@@ -259,8 +264,6 @@ citizen_handler = ConversationHandler(
 application.add_handler(CommandHandler("review", admin_review))
 application.add_handler(CommandHandler("view", admin_view_app))
 application.add_handler(CallbackQueryHandler(admin_button_click))
-
-# Core order change: citizen registration state handles structural flow, global text router handles everything else cleanly
 application.add_handler(citizen_handler)
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_global_text))
 
