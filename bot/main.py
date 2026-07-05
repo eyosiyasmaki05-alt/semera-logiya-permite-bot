@@ -20,14 +20,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# System Configurations
-DB_PATH = "/workspaces/semera-logiya-permite-bot/bot/permits.db"
+# --- UNIVERSAL CLOUD CONFIGURATIONS ---
+DB_PATH = "permits.db"  # Fixed path for Render cloud integration
 ADMIN_PASSCODE = "SemeraLogiya2026"
 
 # Conversation States
-# Citizen Flow States
 FULL_NAME, PHONE_NUMBER, UPLOAD_FILE = range(3)
-# Admin Flow States
 ADMIN_GET_COMMENTS = range(3, 4)
 
 # --- FREE 24/7 KEEP-ALIVE SERVER BLOCK ---
@@ -38,11 +36,10 @@ def home():
     return "⚡ Semera Logiya Permit Bot Engine is fully functional and running live!"
 
 def run_flask():
-    # Runs the web server on port 8080 (standard cloud deployment port)
     flask_app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
-    """Starts a background thread to prevent the hosting container from sleeping"""
+    """Starts a background thread to prevent Render from sleeping"""
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
@@ -51,11 +48,9 @@ def keep_alive():
 # --- DATABASE SETUP ---
 def init_db():
     try:
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Core Table with admin_comments column included
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS applications (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,7 +118,7 @@ async def get_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return UPLOAD_FILE
 
     try:
-        downloads_dir = "/workspaces/semera-logiya-permite-bot/bot/downloads"
+        downloads_dir = "downloads"
         os.makedirs(downloads_dir, exist_ok=True)
         file_path = os.path.join(downloads_dir, document.file_name)
         
@@ -151,10 +146,6 @@ async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("❌ Unauthorized connection attempt blocked.")
         return
 
-    if not os.path.exists(DB_PATH):
-        await update.message.reply_text("📋 Database is empty. No applications found.")
-        return
-
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -163,7 +154,7 @@ async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         conn.close()
 
         if not rows:
-            await update.message.reply_text("📋 There are currently no applications pending review.")
+            await update.message.reply_text("📋 There are currently no applications pending review in the cloud database.")
             return
 
         board_text = (
@@ -198,7 +189,6 @@ async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(f"❌ Application #{target_id} not found.")
             return ConversationHandler.END
 
-        # Store target reference inside the conversation parameters
         context.user_data['admin_target_id'] = target_id
         file_path = row['file_path']
 
@@ -214,7 +204,7 @@ async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             with open(file_path, 'rb') as doc_file:
                 await update.message.reply_document(document=doc_file, caption=f"Blueprint for ID #{target_id}")
         else:
-            await update.message.reply_text("⚠️ Notice: Physical file missing on hosting machine.")
+            await update.message.reply_text("⚠️ Notice: Physical file missing or reset during container reload.")
 
         reply_keyboard = [["Approved", "Rejected", "Under Review"]]
         await update.message.reply_text(
@@ -284,16 +274,12 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 # --- INITIALIZATION ENGINE ---
 def main():
-    # 1. Fire up the local background Flask instance for Uptime pingers
     keep_alive()
-    
-    # 2. Synchronize internal structures
     init_db()
     
     TOKEN = "7978291878:AAFUhlX1mszOfvxMcokboyaniTkL-XnCrlw" 
     application = Application.builder().token(TOKEN).build()
 
-    # Public Citizen Intake System
     citizen_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -305,7 +291,6 @@ def main():
         per_user=True,
     )
 
-    # Managed Engineer Verification System
     admin_handler = ConversationHandler(
         entry_points=[CommandHandler("view", admin_view_app)],
         states={
