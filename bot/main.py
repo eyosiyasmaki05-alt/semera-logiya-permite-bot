@@ -22,6 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 FULL_NAME, PHONE_NUMBER, UPLOAD_FILE = range(3)
+ADMIN_REJECTION_COMMENT = range(1) # State for admin conversation flow
 
 TOKEN = "7978291878:AAFUhlX1mszOfvxMcokboyaniTkL-XnCrlw"
 
@@ -52,6 +53,8 @@ def init_db():
 
 # --- USER CORE LOGIC ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Force clean state entry
+    context.user_data.clear()
     await update.message.reply_text(
         "👋 Welcome to the Semera Logiya Municipality Building Permit Bot.\n\n"
         "Let's get your structural design blueprint submitted. What is your **Full Name**?"
@@ -184,8 +187,11 @@ async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE)
     target_user = data_parts[3]
 
     if new_status == "Rejected":
+        # Store context metadata safely
         context.user_data['handling_rejection_app_id'] = app_id
         context.user_data['handling_rejection_user_id'] = target_user
+        
+        # This message changes state and targets the admin comment block layout safely
         await query.edit_message_caption(caption="⚠️ **Status set to Rejected.**\nNow, type the reason for rejection directly in this chat:")
         return
 
@@ -205,12 +211,13 @@ async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         logger.error(f"Could not alert user: {e}")
 
-async def admin_save_rejection_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_save_rejection_comment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     app_id = context.user_data.get('handling_rejection_app_id')
     target_user = context.user_data.get('handling_rejection_user_id')
     
     if not app_id or not target_user:
-        return 
+        await update.message.reply_text("❌ No active application selection found under review. Use `/review` to pick one.")
+        return ConversationHandler.END
 
     comment_text = update.message.text
 
@@ -220,8 +227,7 @@ async def admin_save_rejection_comment(update: Update, context: ContextTypes.DEF
     conn.commit()
     conn.close()
 
-    del context.user_data['handling_rejection_app_id']
-    del context.user_data['handling_rejection_user_id']
+    context.user_data.clear() # Wipe temporary review values completely clean
 
     await update.message.reply_text(f"✅ Rejection reason logged successfully for App #{app_id}.")
 
@@ -235,6 +241,8 @@ async def admin_save_rejection_comment(update: Update, context: ContextTypes.DEF
     except Exception as e:
         logger.error(f"Could not alert user: {e}")
 
+    return ConversationHandler.END
+
 # --- HANDLER ROUTING CONFIGURATION ---
 citizen_handler = ConversationHandler(
     entry_points=[CommandHandler("start", start)],
@@ -245,12 +253,27 @@ citizen_handler = ConversationHandler(
     },
     fallbacks=[CommandHandler("cancel", cancel)],
     per_user=True,
+    name="citizen_flow",
+    persistent=False
 )
 
+# Dedicated isolated ConversationHandler specifically to lock down open admin text commentary
+admin_comment_handler = ConversationHandler(
+    entry_points=[CallbackQueryHandler(admin_button_click, pattern=r"^status_Rejected_")],
+    states={
+        ADMIN_REJECTION_COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_save_rejection_comment)]
+    },
+    fallbacks=[CommandHandler("cancel", cancel)],
+    per_user=True,
+    name="admin_flow",
+    persistent=False
+)
+
+# Clean, safe linear registrations
 application.add_handler(CommandHandler("review", admin_review))
 application.add_handler(CommandHandler("view", admin_view_app))
-application.add_handler(CallbackQueryHandler(admin_button_click))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_save_rejection_comment))
+application.add_handler(admin_comment_handler) # Catches rejections first safely within its own tracking state
+application.add_handler(CallbackQueryHandler(admin_button_click)) # Handles approvals/under reviews safely
 application.add_handler(citizen_handler)
 
 # --- SERVER GATEWAY & CRON TARGET ---
