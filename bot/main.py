@@ -21,8 +21,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Registration States
 FULL_NAME, PHONE_NUMBER, UPLOAD_FILE = range(3)
-ADMIN_REJECTION_COMMENT = range(1) # State for admin conversation flow
 
 TOKEN = "7978291878:AAFUhlX1mszOfvxMcokboyaniTkL-XnCrlw"
 
@@ -53,7 +53,6 @@ def init_db():
 
 # --- USER CORE LOGIC ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # Force clean state entry
     context.user_data.clear()
     await update.message.reply_text(
         "👋 Welcome to the Semera Logiya Municipality Building Permit Bot.\n\n"
@@ -109,10 +108,11 @@ async def get_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.clear()
     await update.message.reply_text("❌ Process cancelled.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
-# --- ADMINISTRATIVE REVIEW LOGIC (PASCODE SECURED) ---
+# --- ADMINISTRATIVE REVIEW LOGIC (PASSCODE SECURED) ---
 async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or context.args[0] != "Semera2026":
         await update.message.reply_text("❌ Unauthorized access. Usage: `/review Semera2026`")
@@ -187,14 +187,15 @@ async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE)
     target_user = data_parts[3]
 
     if new_status == "Rejected":
-        # Store context metadata safely
+        # Lock user context state specifically to catch rejection reasons next
+        context.user_data['admin_state'] = 'WAITING_REJECTION_COMMENT'
         context.user_data['handling_rejection_app_id'] = app_id
         context.user_data['handling_rejection_user_id'] = target_user
         
-        # This message changes state and targets the admin comment block layout safely
         await query.edit_message_caption(caption="⚠️ **Status set to Rejected.**\nNow, type the reason for rejection directly in this chat:")
         return
 
+    # Process approvals or under reviews instantly
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
     cursor.execute("UPDATE applications SET status = ?, admin_comments = 'None' WHERE id = ?", (new_status, app_id))
@@ -211,37 +212,37 @@ async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         logger.error(f"Could not alert user: {e}")
 
-async def admin_save_rejection_comment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    app_id = context.user_data.get('handling_rejection_app_id')
-    target_user = context.user_data.get('handling_rejection_user_id')
-    
-    if not app_id or not target_user:
-        await update.message.reply_text("❌ No active application selection found under review. Use `/review` to pick one.")
-        return ConversationHandler.END
+# --- GLOBAL TEXT INTERCEPTOR ROUTER ---
+async def handle_global_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check if this user is an admin typing an active rejection reason
+    if context.user_data.get('admin_state') == 'WAITING_REJECTION_COMMENT':
+        app_id = context.user_data.get('handling_rejection_app_id')
+        target_user = context.user_data.get('handling_rejection_user_id')
+        comment_text = update.message.text
 
-    comment_text = update.message.text
+        conn = sqlite3.connect("permit_system.db")
+        cursor = conn.cursor()
+        cursor.execute("UPDATE applications SET status = 'Rejected', admin_comments = ? WHERE id = ?", (comment_text, app_id))
+        conn.commit()
+        conn.close()
 
-    conn = sqlite3.connect("permit_system.db")
-    cursor = conn.cursor()
-    cursor.execute("UPDATE applications SET status = 'Rejected', admin_comments = ? WHERE id = ?", (comment_text, app_id))
-    conn.commit()
-    conn.close()
+        context.user_data.clear() # Clear state memory out immediately
 
-    context.user_data.clear() # Wipe temporary review values completely clean
+        await update.message.reply_text(f"✅ Rejection reason logged successfully for App #{app_id}.")
 
-    await update.message.reply_text(f"✅ Rejection reason logged successfully for App #{app_id}.")
+        try:
+            await context.bot.send_message(
+                chat_id=int(target_user),
+                text=f"❌ **Permit Application Update: REJECTED**\n\n"
+                     f"**Reason/Comments from Engineering Dept:**\n> {comment_text}\n\n"
+                     f"Please correct these issues and use /start to re-submit your files."
+            )
+        except Exception as e:
+            logger.error(f"Could not alert user: {e}")
+        return
 
-    try:
-        await context.bot.send_message(
-            chat_id=int(target_user),
-            text=f"❌ **Permit Application Update: REJECTED**\n\n"
-                 f"**Reason/Comments from Engineering Dept:**\n> {comment_text}\n\n"
-                 f"Please correct these issues and use /start to re-submit your files."
-        )
-    except Exception as e:
-        logger.error(f"Could not alert user: {e}")
-
-    return ConversationHandler.END
+    # If it's a standard text input with no context, reply instructions
+    await update.message.reply_text("Type `/start` to begin your permit application registration, or use an administrative passcode command.")
 
 # --- HANDLER ROUTING CONFIGURATION ---
 citizen_handler = ConversationHandler(
@@ -253,28 +254,15 @@ citizen_handler = ConversationHandler(
     },
     fallbacks=[CommandHandler("cancel", cancel)],
     per_user=True,
-    name="citizen_flow",
-    persistent=False
 )
 
-# Dedicated isolated ConversationHandler specifically to lock down open admin text commentary
-admin_comment_handler = ConversationHandler(
-    entry_points=[CallbackQueryHandler(admin_button_click, pattern=r"^status_Rejected_")],
-    states={
-        ADMIN_REJECTION_COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_save_rejection_comment)]
-    },
-    fallbacks=[CommandHandler("cancel", cancel)],
-    per_user=True,
-    name="admin_flow",
-    persistent=False
-)
-
-# Clean, safe linear registrations
 application.add_handler(CommandHandler("review", admin_review))
 application.add_handler(CommandHandler("view", admin_view_app))
-application.add_handler(admin_comment_handler) # Catches rejections first safely within its own tracking state
-application.add_handler(CallbackQueryHandler(admin_button_click)) # Handles approvals/under reviews safely
+application.add_handler(CallbackQueryHandler(admin_button_click))
+
+# Core order change: citizen registration state handles structural flow, global text router handles everything else cleanly
 application.add_handler(citizen_handler)
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_global_text))
 
 # --- SERVER GATEWAY & CRON TARGET ---
 @app.route('/', methods=['GET', 'POST'])
