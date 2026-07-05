@@ -106,7 +106,7 @@ async def get_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("❌ Application process cancelled.", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("❌ Process cancelled.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 # --- ADMINISTRATIVE REVIEW LOGIC (PASCODE SECURED) ---
@@ -148,7 +148,6 @@ async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Application ID not found.")
         return
 
-    # Build direct inline buttons
     keyboard = [
         [
             InlineKeyboardButton("✅ Approve", callback_data=f"status_Approved_{app_id}_{app_data[0]}"),
@@ -184,9 +183,15 @@ async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE)
     app_id = data_parts[2]
     target_user = data_parts[3]
 
+    if new_status == "Rejected":
+        context.user_data['handling_rejection_app_id'] = app_id
+        context.user_data['handling_rejection_user_id'] = target_user
+        await query.edit_message_caption(caption="⚠️ **Status set to Rejected.**\nNow, type the reason for rejection directly in this chat:")
+        return
+
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    cursor.execute("UPDATE applications SET status = ? WHERE id = ?", (new_status, app_id))
+    cursor.execute("UPDATE applications SET status = ?, admin_comments = 'None' WHERE id = ?", (new_status, app_id))
     conn.commit()
     conn.close()
 
@@ -196,6 +201,36 @@ async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await context.bot.send_message(
             chat_id=int(target_user),
             text=f"🔔 **Permit Review Update Notification!**\n\nYour permit application status has been updated to: **{new_status}**."
+        )
+    except Exception as e:
+        logger.error(f"Could not alert user: {e}")
+
+async def admin_save_rejection_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    app_id = context.user_data.get('handling_rejection_app_id')
+    target_user = context.user_data.get('handling_rejection_user_id')
+    
+    if not app_id or not target_user:
+        return 
+
+    comment_text = update.message.text
+
+    conn = sqlite3.connect("permit_system.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE applications SET status = 'Rejected', admin_comments = ? WHERE id = ?", (comment_text, app_id))
+    conn.commit()
+    conn.close()
+
+    del context.user_data['handling_rejection_app_id']
+    del context.user_data['handling_rejection_user_id']
+
+    await update.message.reply_text(f"✅ Rejection reason logged successfully for App #{app_id}.")
+
+    try:
+        await context.bot.send_message(
+            chat_id=int(target_user),
+            text=f"❌ **Permit Application Update: REJECTED**\n\n"
+                 f"**Reason/Comments from Engineering Dept:**\n> {comment_text}\n\n"
+                 f"Please correct these issues and use /start to re-submit your files."
         )
     except Exception as e:
         logger.error(f"Could not alert user: {e}")
@@ -215,6 +250,7 @@ citizen_handler = ConversationHandler(
 application.add_handler(CommandHandler("review", admin_review))
 application.add_handler(CommandHandler("view", admin_view_app))
 application.add_handler(CallbackQueryHandler(admin_button_click))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_save_rejection_comment))
 application.add_handler(citizen_handler)
 
 # --- SERVER GATEWAY & CRON TARGET ---
