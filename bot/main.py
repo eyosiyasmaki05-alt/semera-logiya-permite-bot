@@ -3,12 +3,13 @@ import sqlite3
 import logging
 import asyncio
 from flask import Flask, request
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     ConversationHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -21,7 +22,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 FULL_NAME, PHONE_NUMBER, UPLOAD_FILE = range(3)
-ADMIN_GET_COMMENTS = range(3, 4)
 
 TOKEN = "7978291878:AAFUhlX1mszOfvxMcokboyaniTkL-XnCrlw"
 
@@ -75,7 +75,6 @@ async def get_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     full_name = context.user_data.get('full_name', 'Unknown')
     phone = context.user_data.get('phone', 'Unknown')
     
-    # Bulletproof catch for multiple phone upload formats
     if update.message.document:
         file_id = update.message.document.file_id
     elif update.message.photo:
@@ -112,7 +111,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 # --- ADMINISTRATIVE REVIEW LOGIC (PASCODE SECURED) ---
 async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Passcode validation check
     if not context.args or context.args[0] != "Semera2026":
         await update.message.reply_text("❌ Unauthorized access. Usage: `/review Semera2026`")
         return
@@ -133,13 +131,12 @@ async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += "\nTo review a file, type `/view <Application ID>`"
     await update.message.reply_text(msg)
 
-async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Please specify an ID. Usage: `/view 1`")
-        return ConversationHandler.END
+        return
 
     app_id = context.args[0]
-    context.user_data['review_app_id'] = app_id
 
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
@@ -149,73 +146,76 @@ async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if not app_data:
         await update.message.reply_text("❌ Application ID not found.")
-        return ConversationHandler.END
+        return
 
-    context.user_data['review_target_user'] = app_data[0]
+    # Build direct inline buttons
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Approve", callback_data=f"status_Approved_{app_id}_{app_data[0]}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"status_Rejected_{app_id}_{app_data[0]}")
+        ],
+        [
+            InlineKeyboardButton("⏳ Keep Under Review", callback_data=f"status_Under Review_{app_id}_{app_data[0]}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(f"📝 **Reviewing App #{app_id}**\n👤 **Name:** {app_data[1]}\n📞 **Phone:** {app_data[2]}\n🚦 **Status:** {app_data[4]}")
+    await update.message.reply_text(
+        f"📝 **Reviewing App #{app_id}**\n👤 **Name:** {app_data[1]}\n📞 **Phone:** {app_data[2]}\n🚦 **Status:** {app_data[4]}"
+    )
     
     try:
-        await context.bot.send_document(chat_id=update.effective_chat.id, document=app_data[3], caption="Submitted Blueprint File")
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id, 
+            document=app_data[3], 
+            caption="Review the blueprint file below and tap a decision:",
+            reply_markup=reply_markup
+        )
     except Exception as e:
         logger.error(f"Document upload issue: {e}")
+        await update.message.reply_text("Action selection:", reply_markup=reply_markup)
 
-    reply_keyboard = [["Approved", "Rejected", "Under Review"]]
-    await update.message.reply_text(
-        "Select the updated status for this permit submission:",
-        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
-    )
-    return ADMIN_GET_COMMENTS
-
-async def admin_save_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    app_id = context.user_data.get('review_app_id')
-    status = update.message.text
-    comments = f"Reviewed status updated to {status}"
-    target_user = context.user_data.get('review_target_user')
+async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data_parts = query.data.split("_")
+    new_status = data_parts[1]
+    app_id = data_parts[2]
+    target_user = data_parts[3]
 
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    cursor.execute("UPDATE applications SET status = ?, admin_comments = ? WHERE id = ?", (status, comments, app_id))
+    cursor.execute("UPDATE applications SET status = ? WHERE id = ?", (new_status, app_id))
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(f"✅ Record updated. Permit set to **{status}**.", reply_markup=ReplyKeyboardRemove())
+    await query.edit_message_caption(caption=f"🔒 **Decision Registered:** Set to {new_status}")
 
     try:
         await context.bot.send_message(
-            chat_id=target_user,
-            text=f"🔔 **Permit Review Update Notification!**\n\n"
-                 f"Your permit application status has been updated to: **{status}**."
+            chat_id=int(target_user),
+            text=f"🔔 **Permit Review Update Notification!**\n\nYour permit application status has been updated to: **{new_status}**."
         )
     except Exception as e:
         logger.error(f"Could not alert user: {e}")
-
-    return ConversationHandler.END
 
 # --- HANDLER ROUTING CONFIGURATION ---
 citizen_handler = ConversationHandler(
     entry_points=[CommandHandler("start", start)],
     states={
-        FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
-        PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
-        UPLOAD_FILE: [MessageHandler(filters.Document.ALL | filters.PHOTO, get_file)],
-    },
-    fallbacks=[CommandHandler("cancel", cancel)],
-    per_user=True,
-)
-
-admin_handler = ConversationHandler(
-    entry_points=[CommandHandler("view", admin_view_app)],
-    states={
-        ADMIN_GET_COMMENTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_save_decision)],
+        FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/(review|view)'), get_name)],
+        PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/(review|view)'), get_phone)],
+        UPLOAD_FILE: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_file)],
     },
     fallbacks=[CommandHandler("cancel", cancel)],
     per_user=True,
 )
 
 application.add_handler(CommandHandler("review", admin_review))
+application.add_handler(CommandHandler("view", admin_view_app))
+application.add_handler(CallbackQueryHandler(admin_button_click))
 application.add_handler(citizen_handler)
-application.add_handler(admin_handler)
 
 # --- SERVER GATEWAY & CRON TARGET ---
 @app.route('/', methods=['GET', 'POST'])
@@ -225,7 +225,6 @@ def handle_webhook():
         update = Update.de_json(update_data, application.bot)
         asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
         return 'OK', 200
-    # Returns a clear 200 OK message to satisfy cron-job.org
     return "🚀 System Gateway Stream is Live and Listening...", 200
 
 def start_background_loop(loop):
