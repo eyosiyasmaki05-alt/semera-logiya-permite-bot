@@ -20,7 +20,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Registration States (Expanded for 5 specific documents)
+# Registration States (Explicitly mapped for 5 distinct documents)
 FULL_NAME, PHONE_NUMBER, UPLOAD_ARCH, UPLOAD_STRUCT, UPLOAD_ELEC, UPLOAD_FOUND, UPLOAD_BOQ = range(7)
 
 # Grabs token safely from Render environments, drops back to your token string securely
@@ -328,7 +328,7 @@ citizen_handler = ConversationHandler(
         UPLOAD_ARCH: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_architectural)],
         UPLOAD_STRUCT: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_structural)],
         UPLOAD_ELEC: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_electrical)],
-        UPLOAD_FOUND: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.FOUNDATION | filters.PHOTO) & ~filters.COMMAND, get_foundation],
+        UPLOAD_FOUND: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_foundation)],
         UPLOAD_BOQ: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_boq)],
     },
     fallbacks=[CommandHandler("cancel", cancel)],
@@ -339,10 +339,10 @@ application.add_handler(CommandHandler("review", admin_review))
 application.add_handler(CommandHandler("view", admin_view_app))
 application.add_handler(CallbackQueryHandler(admin_button_click))
 
-# CRITICAL INTERCEPT ORDER: The step-by-step loop runs first
+# CRITICAL INTERCEPT ORDER: The step-by-step sequence loops run first
 application.add_handler(citizen_handler)
 
-# The fallback catcher handles anything else outside active application sessions
+# The fallback catcher handles messages outside active structural permit applications
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_global_text))
 
 # --- LIVE POLLING ENGINE TARGET ---
