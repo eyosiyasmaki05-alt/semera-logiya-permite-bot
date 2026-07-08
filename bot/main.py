@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 FULL_NAME, PHONE_NUMBER, UPLOAD_ARCH, UPLOAD_STRUCT, UPLOAD_ELEC, UPLOAD_FOUND, UPLOAD_BOQ = range(7)
 
 # Replace the string below with your active fresh token from @BotFather
-TOKEN = "7978291878:AAF0n9kf1InCL_OqzKD-Ar6FclAZ4Ug-n9I"
+TOKEN = "7978291878:AAGL1uWtkWgvj9vf91kySu_kZkuk3Abm6nY"
 
 custom_request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
 application = Application.builder().token(TOKEN).request(custom_request).build()
