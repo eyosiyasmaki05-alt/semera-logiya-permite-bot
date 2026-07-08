@@ -2,7 +2,6 @@ import os
 import sqlite3
 import logging
 import asyncio
-from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
@@ -24,11 +23,8 @@ logger = logging.getLogger(__name__)
 # Registration States (Expanded for 5 specific documents)
 FULL_NAME, PHONE_NUMBER, UPLOAD_ARCH, UPLOAD_STRUCT, UPLOAD_ELEC, UPLOAD_FOUND, UPLOAD_BOQ = range(7)
 
-TOKEN = "7978291878:AAGL1uWtkWgvj9vf91kySu_kZkuk3Abm6nY"
-
-app = Flask('')
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
+# Replace the string below with your active fresh token from @BotFather
+TOKEN = "7978291878:AAF0n9kf1InCL_OqzKD-Ar6FclAZ4Ug-n9I"
 
 custom_request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
 application = Application.builder().token(TOKEN).request(custom_request).build()
@@ -249,7 +245,7 @@ async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     try:
-        # Defaulting file display overview to primary Architectural file for reference
+        # Display primary Architectural file for review context
         await context.bot.send_document(
             chat_id=update.effective_chat.id, 
             document=app_data[3], 
@@ -345,28 +341,10 @@ application.add_handler(CallbackQueryHandler(admin_button_click))
 application.add_handler(citizen_handler)
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_global_text))
 
-# --- SERVER GATEWAY & CRON TARGET ---
-@app.route('/', methods=['GET', 'POST'])
-def handle_webhook():
-    if request.method == 'POST':
-        update_data = request.get_json(force=True)
-        update = Update.de_json(update_data, application.bot)
-        asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
-        return 'OK', 200
-    return "🚀 System Gateway Stream is Live and Listening...", 200
-
-def start_background_loop(loop):
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(application.initialize())
-    loop.run_forever()
-
+# --- LIVE POLLING ENGINE TARGET ---
 if __name__ == "__main__":
     init_db()
     
-    from threading import Thread
-    t = Thread(target=start_background_loop, args=(loop,))
-    t.daemon = True
-    t.start()
-    
-    logger.info("🤖 Engine thread launched successfully. Starting Flask routing listener...")
-    app.run(host='0.0.0.0', port=8080)
+    logger.info("🤖 Starting Semera Logiya Permit Bot in local Polling mode...")
+    # This loop polls updates continuously directly from the terminal window
+    application.run_polling()
