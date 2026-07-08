@@ -32,7 +32,6 @@ application = Application.builder().token(TOKEN).request(custom_request).build()
 
 # --- FAKE WEB SERVER FOR RENDER PORT BINDING ---
 def run_health_server():
-    # Render automatically passes a PORT environment variable. We default to 8000 if missing.
     port = int(os.getenv("PORT", 8000))
     server_address = ("", port)
     
@@ -215,7 +214,7 @@ async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT id, full_name, status FROM applications WHERE status = 'Under Review'")
+    cursor.execute("SELECT user_id, full_name, status FROM applications WHERE status = 'Under Review'")
     apps = cursor.fetchall()
     conn.close()
 
@@ -223,54 +222,74 @@ async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📁 No pending applications require review right now.")
         return
 
-    msg = "📋 **Pending Applications:**\n\n"
+    msg = "📋 **Pending Applications under Review:**\n\n"
     for app_item in apps:
-        msg += f"🔹 **ID:** {app_item[0]} | **Name:** {app_item[1]}\n"
-    msg += "\nTo review a file, type `/view <Application ID>`"
-    await update.message.reply_text(msg)
+        msg += f"👤 **Name:** {app_item[1]} \n🆔 **Review ID:** `{app_item[0]}`\n\n"
+    msg += "To review an applicant's complete 5 files, copy their **Review ID** number and type:\n`/view <Review ID>`"
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Please specify an ID. Usage: `/view 1`")
+        await update.message.reply_text("Please specify a Review ID. Usage: `/view 123456789`")
         return
 
-    app_id = context.args[0]
+    target_user_id = context.args[0]
 
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, full_name, phone, arch_file_id, status FROM applications WHERE id = ?", (app_id,))
+    cursor.execute("""
+        SELECT user_id, full_name, phone, arch_file_id, struct_file_id, elec_file_id, found_file_id, boq_file_id, status 
+        FROM applications WHERE user_id = ?
+    """, (target_user_id,))
     app_data = cursor.fetchone()
     conn.close()
 
     if not app_data:
-        await update.message.reply_text("❌ Application ID not found.")
+        await update.message.reply_text("❌ Application ID (User ID) not found in the system database.")
         return
 
+    # Unpack all columns safely
+    user_id, full_name, phone, arch, struct, elec, found, boq, status = app_data
+
+    await update.message.reply_text(
+        f"📝 **Reviewing Complete Application Package**\n"
+        f"👤 **Name:** {full_name}\n"
+        f"📞 **Phone:** {phone}\n"
+        f"🚦 **Current Status:** {status}\n\n"
+        f"⏳ *Sending all 5 design files for evaluation now...*"
+    )
+
+    # File types label list to loop through cleanly
+    files_to_send = [
+        ("1️⃣ Architectural Drawings", arch),
+        ("2️⃣ Structural Drawings", struct),
+        ("3️⃣ Electrical Drawings", elec),
+        ("4️⃣ Foundation & Reinforcement Details", found),
+        ("5️⃣ Bill of Quantities (BoQ)", boq)
+    ]
+
+    # Loop and deliver every document cleanly to the admin chat window
+    for label, file_id in files_to_send:
+        if file_id:
+            try:
+                await context.bot.send_document(chat_id=update.effective_chat.id, document=file_id, caption=label)
+                await asyncio.sleep(0.5) # Avoid hitting Telegram rate limits
+            except Exception as e:
+                logger.error(f"Error sending {label}: {e}")
+                await update.message.reply_text(f"⚠️ Could not display {label} file link.")
+
+    # Render decision management layout buttons below the files
     keyboard = [
         [
-            InlineKeyboardButton("✅ Approve", callback_data=f"status_Approved_{app_id}_{app_data[0]}"),
-            InlineKeyboardButton("❌ Reject", callback_data=f"status_Rejected_{app_id}_{app_data[0]}")
+            InlineKeyboardButton("✅ Approve Application", callback_data=f"status_Approved_{user_id}"),
+            InlineKeyboardButton("❌ Reject Application", callback_data=f"status_Rejected_{user_id}")
         ],
         [
-            InlineKeyboardButton("⏳ Keep Under Review", callback_data=f"status_Under Review_{app_id}_{app_data[0]}")
+            InlineKeyboardButton("⏳ Keep Under Review", callback_data=f"status_Under Review_{user_id}")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        f"📝 **Reviewing App #{app_id}**\n👤 **Name:** {app_data[1]}\n📞 **Phone:** {app_data[2]}\n🚦 **Status:** {app_data[4]}"
-    )
-    
-    try:
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id, 
-            document=app_data[3], 
-            caption="Review the primary blueprint file below and tap a decision:",
-            reply_markup=reply_markup
-        )
-    except Exception as e:
-        logger.error(f"Document upload issue: {e}")
-        await update.message.reply_text("Action selection:", reply_markup=reply_markup)
+    await update.message.reply_text("🏁 **Engineering Dept Evaluation Decision Menu:**", reply_markup=reply_markup)
 
 async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -278,24 +297,22 @@ async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     data_parts = query.data.split("_")
     new_status = data_parts[1]
-    app_id = data_parts[2]
-    target_user = data_parts[3]
+    target_user = data_parts[2]
 
     if new_status == "Rejected":
         context.user_data['admin_state'] = 'WAITING_REJECTION_COMMENT'
-        context.user_data['handling_rejection_app_id'] = app_id
         context.user_data['handling_rejection_user_id'] = target_user
         
-        await query.edit_message_caption(caption="⚠️ **Status set to Rejected.**\nNow, type the reason for rejection directly in this chat:")
+        await query.edit_message_text(text="⚠️ **Status set to Rejected.**\nNow, type the reason for rejection directly into this chat:")
         return
 
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    cursor.execute("UPDATE applications SET status = ?, admin_comments = 'None' WHERE id = ?", (new_status, app_id))
+    cursor.execute("UPDATE applications SET status = ?, admin_comments = 'None' WHERE user_id = ?", (new_status, target_user))
     conn.commit()
     conn.close()
 
-    await query.edit_message_caption(caption=f"🔒 **Decision Registered:** Set to {new_status}")
+    await query.edit_message_text(text=f"🔒 **Decision Registered:** Application has been set to **{new_status}**.")
 
     try:
         await context.bot.send_message(
@@ -308,19 +325,18 @@ async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # --- GLOBAL TEXT INTERCEPTOR ROUTER ---
 async def handle_global_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('admin_state') == 'WAITING_REJECTION_COMMENT':
-        app_id = context.user_data.get('handling_rejection_app_id')
         target_user = context.user_data.get('handling_rejection_user_id')
         comment_text = update.message.text
 
         conn = sqlite3.connect("permit_system.db")
         cursor = conn.cursor()
-        cursor.execute("UPDATE applications SET status = 'Rejected', admin_comments = ? WHERE id = ?", (comment_text, app_id))
+        cursor.execute("UPDATE applications SET status = 'Rejected', admin_comments = ? WHERE user_id = ?", (comment_text, target_user))
         conn.commit()
         conn.close()
 
         context.user_data.clear() 
 
-        await update.message.reply_text(f"✅ Rejection reason logged successfully for App #{app_id}.")
+        await update.message.reply_text(f"✅ Rejection reason logged successfully for User ID: {target_user}.")
 
         try:
             await context.bot.send_message(
@@ -361,9 +377,6 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_g
 # --- LIVE ENGINE EXECUTION TARGET ---
 if __name__ == "__main__":
     init_db()
-    
-    # Start the fake web server inside an independent parallel thread loop
     threading.Thread(target=run_health_server, daemon=True).start()
-    
     logger.info("🤖 Starting Semera Logiya Permit Bot in Web-Service Polling mode...")
     application.run_polling()
