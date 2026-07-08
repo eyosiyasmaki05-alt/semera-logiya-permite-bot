@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 # Registration States (Expanded for 5 specific documents)
 FULL_NAME, PHONE_NUMBER, UPLOAD_ARCH, UPLOAD_STRUCT, UPLOAD_ELEC, UPLOAD_FOUND, UPLOAD_BOQ = range(7)
 
-# Replace the string below with your active fresh token from @BotFather
-TOKEN = "7978291878:AAGL1uWtkWgvj9vf91kySu_kZkuk3Abm6nY"
+# Grabs token safely from Render environments, drops back to your token string securely
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "7978291878:AAGL1uWtkWgvj9vf91kySu_kZkuk3Abm6nY").strip()
 
 custom_request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
 application = Application.builder().token(TOKEN).request(custom_request).build()
@@ -328,7 +328,7 @@ citizen_handler = ConversationHandler(
         UPLOAD_ARCH: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_architectural)],
         UPLOAD_STRUCT: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_structural)],
         UPLOAD_ELEC: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_electrical)],
-        UPLOAD_FOUND: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_foundation)],
+        UPLOAD_FOUND: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.FOUNDATION | filters.PHOTO) & ~filters.COMMAND, get_foundation],
         UPLOAD_BOQ: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_boq)],
     },
     fallbacks=[CommandHandler("cancel", cancel)],
@@ -338,7 +338,11 @@ citizen_handler = ConversationHandler(
 application.add_handler(CommandHandler("review", admin_review))
 application.add_handler(CommandHandler("view", admin_view_app))
 application.add_handler(CallbackQueryHandler(admin_button_click))
+
+# CRITICAL INTERCEPT ORDER: The step-by-step loop runs first
 application.add_handler(citizen_handler)
+
+# The fallback catcher handles anything else outside active application sessions
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_global_text))
 
 # --- LIVE POLLING ENGINE TARGET ---
@@ -346,5 +350,4 @@ if __name__ == "__main__":
     init_db()
     
     logger.info("🤖 Starting Semera Logiya Permit Bot in local Polling mode...")
-    # This loop polls updates continuously directly from the terminal window
     application.run_polling()
