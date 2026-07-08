@@ -2,6 +2,8 @@ import os
 import sqlite3
 import logging
 import asyncio
+import threading
+from http.server import SimpleHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
@@ -20,21 +22,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Registration States (Explicitly mapped for 5 distinct documents)
+# Registration States
 FULL_NAME, PHONE_NUMBER, UPLOAD_ARCH, UPLOAD_STRUCT, UPLOAD_ELEC, UPLOAD_FOUND, UPLOAD_BOQ = range(7)
 
-# Grabs token safely from Render environments, drops back to your token string securely
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "7978291878:AAGL1uWtkWgvj9vf91kySu_kZkuk3Abm6nY").strip()
 
 custom_request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
 application = Application.builder().token(TOKEN).request(custom_request).build()
 
+# --- FAKE WEB SERVER FOR RENDER PORT BINDING ---
+def run_health_server():
+    # Render automatically passes a PORT environment variable. We default to 8000 if missing.
+    port = int(os.getenv("PORT", 8000))
+    server_address = ("", port)
+    
+    class HealthCheckHandler(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Bot is alive and running!")
+
+    httpd = HTTPServer(server_address, HealthCheckHandler)
+    logger.info(f"🌍 Fake web server listening on port {port} to satisfy Render...")
+    httpd.serve_forever()
+
 # --- DATABASE LAYER ---
 def init_db():
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    
-    # Check if table already exists to avoid throwing errors on migration
     cursor.execute("PRAGMA table_info(applications)")
     columns = [col[1] for col in cursor.fetchall()]
     
@@ -55,7 +71,6 @@ def init_db():
             )
         """)
     else:
-        # If migrating old database schema gracefully
         if "arch_file_id" not in columns:
             cursor.execute("ALTER TABLE applications ADD COLUMN arch_file_id TEXT")
             cursor.execute("ALTER TABLE applications ADD COLUMN struct_file_id TEXT")
@@ -96,12 +111,15 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     )
     return UPLOAD_ARCH
 
-# Helper function to extract file tracking ID cleanly without duplicating code blocks
 def extract_file_id(message):
     if message.document:
         return message.document.file_id
     elif message.photo:
         return message.photo[-1].file_id
+    elif message.audio:
+        return message.audio.file_id
+    elif message.voice:
+        return message.voice.file_id
     elif hasattr(message, 'attachment') and message.attachment:
         return message.attachment.file_id
     return None
@@ -154,7 +172,6 @@ async def get_boq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     
     context.user_data['boq_file_id'] = file_id
 
-    # Gather data parameters for persistence
     user_id = update.message.from_user.id
     full_name = context.user_data.get('full_name', 'Unknown')
     phone = context.user_data.get('phone', 'Unknown')
@@ -190,7 +207,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("❌ Process cancelled.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
-# --- ADMINISTRATIVE REVIEW LOGIC (PASSCODE SECURED) ---
+# --- ADMINISTRATIVE REVIEW LOGIC ---
 async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or context.args[0] != "Semera2026":
         await update.message.reply_text("❌ Unauthorized access. Usage: `/review Semera2026`")
@@ -245,7 +262,6 @@ async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     try:
-        # Display primary Architectural file for review context
         await context.bot.send_document(
             chat_id=update.effective_chat.id, 
             document=app_data[3], 
@@ -325,11 +341,11 @@ citizen_handler = ConversationHandler(
     states={
         FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
         PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
-        UPLOAD_ARCH: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_architectural)],
-        UPLOAD_STRUCT: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_structural)],
-        UPLOAD_ELEC: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_electrical)],
-        UPLOAD_FOUND: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_foundation)],
-        UPLOAD_BOQ: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_boq)],
+        UPLOAD_ARCH: [MessageHandler(filters.ALL & ~filters.COMMAND, get_architectural)],
+        UPLOAD_STRUCT: [MessageHandler(filters.ALL & ~filters.COMMAND, get_structural)],
+        UPLOAD_ELEC: [MessageHandler(filters.ALL & ~filters.COMMAND, get_electrical)],
+        UPLOAD_FOUND: [MessageHandler(filters.ALL & ~filters.COMMAND, get_foundation)],
+        UPLOAD_BOQ: [MessageHandler(filters.ALL & ~filters.COMMAND, get_boq)],
     },
     fallbacks=[CommandHandler("cancel", cancel)],
     per_user=True,
@@ -339,15 +355,15 @@ application.add_handler(CommandHandler("review", admin_review))
 application.add_handler(CommandHandler("view", admin_view_app))
 application.add_handler(CallbackQueryHandler(admin_button_click))
 
-# CRITICAL INTERCEPT ORDER: The step-by-step sequence loops run first
 application.add_handler(citizen_handler)
-
-# The fallback catcher handles messages outside active structural permit applications
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_global_text))
 
-# --- LIVE POLLING ENGINE TARGET ---
+# --- LIVE ENGINE EXECUTION TARGET ---
 if __name__ == "__main__":
     init_db()
     
-    logger.info("🤖 Starting Semera Logiya Permit Bot in local Polling mode...")
+    # Start the fake web server inside an independent parallel thread loop
+    threading.Thread(target=run_health_server, daemon=True).start()
+    
+    logger.info("🤖 Starting Semera Logiya Permit Bot in Web-Service Polling mode...")
     application.run_polling()
