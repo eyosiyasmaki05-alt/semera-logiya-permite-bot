@@ -21,10 +21,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Registration States
-FULL_NAME, PHONE_NUMBER, UPLOAD_FILE = range(3)
+# Registration States (Expanded for 5 specific documents)
+FULL_NAME, PHONE_NUMBER, UPLOAD_ARCH, UPLOAD_STRUCT, UPLOAD_ELEC, UPLOAD_FOUND, UPLOAD_BOQ = range(7)
 
-TOKEN = "7978291878:AAFUhlX1mszOfvxMcokboyaniTkL-XnCrlw"
+TOKEN = "7978291878:AAGL1uWtkWgvj9vf91kySu_kZkuk3Abm6nY"
 
 app = Flask('')
 loop = asyncio.new_event_loop()
@@ -37,17 +37,36 @@ application = Application.builder().token(TOKEN).request(custom_request).build()
 def init_db():
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS applications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER UNIQUE,
-            full_name TEXT,
-            phone TEXT,
-            file_id TEXT,
-            status TEXT DEFAULT 'Under Review',
-            admin_comments TEXT DEFAULT 'None'
-        )
-    """)
+    
+    # Check if table already exists to avoid throwing errors on migration
+    cursor.execute("PRAGMA table_info(applications)")
+    columns = [col[1] for col in cursor.fetchall()]
+    
+    if not columns:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS applications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER UNIQUE,
+                full_name TEXT,
+                phone TEXT,
+                arch_file_id TEXT,
+                struct_file_id TEXT,
+                elec_file_id TEXT,
+                found_file_id TEXT,
+                boq_file_id TEXT,
+                status TEXT DEFAULT 'Under Review',
+                admin_comments TEXT DEFAULT 'None'
+            )
+        """)
+    else:
+        # If migrating old database schema gracefully
+        if "arch_file_id" not in columns:
+            cursor.execute("ALTER TABLE applications ADD COLUMN arch_file_id TEXT")
+            cursor.execute("ALTER TABLE applications ADD COLUMN struct_file_id TEXT")
+            cursor.execute("ALTER TABLE applications ADD COLUMN elec_file_id TEXT")
+            cursor.execute("ALTER TABLE applications ADD COLUMN found_file_id TEXT")
+            cursor.execute("ALTER TABLE applications ADD COLUMN boq_file_id TEXT")
+            
     conn.commit()
     conn.close()
 
@@ -61,7 +80,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return FULL_NAME
 
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # IMMUNITY GUARD: If admin is typing a comment, kick them out of the citizen flow immediately!
     if context.user_data.get('admin_state') == 'WAITING_REJECTION_COMMENT':
         await handle_global_text(update, context)
         return ConversationHandler.END
@@ -77,40 +95,95 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     context.user_data['phone'] = update.message.text
     await update.message.reply_text(
-        "Perfect. Finally, please upload your **Structural Design Blueprint File** (PDF or image document):"
+        "Perfect. Now let's upload the required documents step-by-step.\n\n"
+        "1️⃣ Please upload your **Architectural Drawings** (PDF or image document):"
     )
-    return UPLOAD_FILE
+    return UPLOAD_ARCH
 
-async def get_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+# Helper function to extract file tracking ID cleanly without duplicating code blocks
+def extract_file_id(message):
+    if message.document:
+        return message.document.file_id
+    elif message.photo:
+        return message.photo[-1].file_id
+    elif hasattr(message, 'attachment') and message.attachment:
+        return message.attachment.file_id
+    return None
+
+async def get_architectural(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    file_id = extract_file_id(update.message)
+    if not file_id:
+        await update.message.reply_text("❌ File format invalid. Please upload your **Architectural Drawings** as a PDF or photo:")
+        return UPLOAD_ARCH
+    
+    context.user_data['arch_file_id'] = file_id
+    await update.message.reply_text("2️⃣ Received! Next, please upload your **Structural Drawings** (PDF or image document):")
+    return UPLOAD_STRUCT
+
+async def get_structural(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    file_id = extract_file_id(update.message)
+    if not file_id:
+        await update.message.reply_text("❌ File format invalid. Please upload your **Structural Drawings** as a PDF or photo:")
+        return UPLOAD_STRUCT
+    
+    context.user_data['struct_file_id'] = file_id
+    await update.message.reply_text("3️⃣ Received! Next, please upload your **Electrical Drawings** (PDF or image document):")
+    return UPLOAD_ELEC
+
+async def get_electrical(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    file_id = extract_file_id(update.message)
+    if not file_id:
+        await update.message.reply_text("❌ File format invalid. Please upload your **Electrical Drawings** as a PDF or photo:")
+        return UPLOAD_ELEC
+    
+    context.user_data['elec_file_id'] = file_id
+    await update.message.reply_text("4️⃣ Received! Next, please upload your **Foundation and Reinforcement Details** (PDF or image document):")
+    return UPLOAD_FOUND
+
+async def get_foundation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    file_id = extract_file_id(update.message)
+    if not file_id:
+        await update.message.reply_text("❌ File format invalid. Please upload your **Foundation and Reinforcement Details** as a PDF or photo:")
+        return UPLOAD_FOUND
+    
+    context.user_data['found_file_id'] = file_id
+    await update.message.reply_text("5️⃣ Received! Last step, please upload your **Bill of Quantities (BoQ)** (PDF or image document):")
+    return UPLOAD_BOQ
+
+async def get_boq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    file_id = extract_file_id(update.message)
+    if not file_id:
+        await update.message.reply_text("❌ File format invalid. Please upload your **Bill of Quantities (BoQ)** as a PDF or photo:")
+        return UPLOAD_BOQ
+    
+    context.user_data['boq_file_id'] = file_id
+
+    # Gather data parameters for persistence
     user_id = update.message.from_user.id
     full_name = context.user_data.get('full_name', 'Unknown')
     phone = context.user_data.get('phone', 'Unknown')
-    
-    if update.message.document:
-        file_id = update.message.document.file_id
-    elif update.message.photo:
-        file_id = update.message.photo[-1].file_id
-    elif hasattr(update.message, 'attachment') and update.message.attachment:
-        file_id = update.message.attachment.file_id
-    else:
-        await update.message.reply_text("❌ Telegram could not read this file format. Please try sending it as a standard PDF document or photo.")
-        return UPLOAD_FILE
+    arch_id = context.user_data.get('arch_file_id')
+    struct_id = context.user_data.get('struct_file_id')
+    elec_id = context.user_data.get('elec_file_id')
+    found_id = context.user_data.get('found_file_id')
+    boq_id = context.user_data.get('boq_file_id')
 
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
     try:
         cursor.execute("""
-            INSERT OR REPLACE INTO applications (user_id, full_name, phone, file_id, status)
-            VALUES (?, ?, ?, ?, 'Under Review')
-        """, (user_id, full_name, phone, file_id))
+            INSERT OR REPLACE INTO applications (
+                user_id, full_name, phone, arch_file_id, struct_file_id, elec_file_id, found_file_id, boq_file_id, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Under Review')
+        """, (user_id, full_name, phone, arch_id, struct_id, elec_id, found_id, boq_id))
         conn.commit()
         await update.message.reply_text(
-            "✅ Success! Your application and design files have been securely submitted to the Engineering Department.\n"
+            "✅ Success! All 5 required architectural and structural engineering design files have been securely submitted to the Engineering Department.\n"
             "You will receive a notification here as soon as a review decision is made."
         )
     except Exception as e:
-        logger.error(f"Database error during file upload: {e}")
-        await update.message.reply_text("❌ System error saving your file to the database. Please try sending it again.")
+        logger.error(f"Database error during multi-file upload save operations: {e}")
+        await update.message.reply_text("❌ System error saving your files to the database. Please try running /start to re-submit.")
     finally:
         conn.close()
 
@@ -152,7 +225,7 @@ async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, full_name, phone, file_id, status FROM applications WHERE id = ?", (app_id,))
+    cursor.execute("SELECT user_id, full_name, phone, arch_file_id, status FROM applications WHERE id = ?", (app_id,))
     app_data = cursor.fetchone()
     conn.close()
 
@@ -176,10 +249,11 @@ async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     try:
+        # Defaulting file display overview to primary Architectural file for reference
         await context.bot.send_document(
             chat_id=update.effective_chat.id, 
             document=app_data[3], 
-            caption="Review the blueprint file below and tap a decision:",
+            caption="Review the primary blueprint file below and tap a decision:",
             reply_markup=reply_markup
         )
     except Exception as e:
@@ -255,7 +329,11 @@ citizen_handler = ConversationHandler(
     states={
         FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
         PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
-        UPLOAD_FILE: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_file)],
+        UPLOAD_ARCH: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_architectural)],
+        UPLOAD_STRUCT: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_structural)],
+        UPLOAD_ELEC: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_electrical)],
+        UPLOAD_FOUND: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_foundation)],
+        UPLOAD_BOQ: [MessageHandler((filters.Document.ALL | filters.PHOTO) & ~filters.COMMAND, get_boq)],
     },
     fallbacks=[CommandHandler("cancel", cancel)],
     per_user=True,
