@@ -3,6 +3,7 @@ import sqlite3
 import logging
 import asyncio
 import threading
+import random
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
@@ -50,14 +51,19 @@ def run_health_server():
 def init_db():
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
+    
+    # Drop old table constraint structure if transitioning to allow multiple distinct tracking numbers
     cursor.execute("PRAGMA table_info(applications)")
     columns = [col[1] for col in cursor.fetchall()]
     
-    if not columns:
+    # If tracking_id doesn't exist, we build a clean scalable schema
+    if "tracking_id" not in columns:
+        cursor.execute("DROP TABLE IF EXISTS applications")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS applications (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER UNIQUE,
+                tracking_id TEXT UNIQUE,
+                user_id INTEGER,
                 full_name TEXT,
                 phone TEXT,
                 arch_file_id TEXT,
@@ -69,16 +75,19 @@ def init_db():
                 admin_comments TEXT DEFAULT 'None'
             )
         """)
-    else:
-        if "arch_file_id" not in columns:
-            cursor.execute("ALTER TABLE applications ADD COLUMN arch_file_id TEXT")
-            cursor.execute("ALTER TABLE applications ADD COLUMN struct_file_id TEXT")
-            cursor.execute("ALTER TABLE applications ADD COLUMN elec_file_id TEXT")
-            cursor.execute("ALTER TABLE applications ADD COLUMN found_file_id TEXT")
-            cursor.execute("ALTER TABLE applications ADD COLUMN boq_file_id TEXT")
-            
     conn.commit()
     conn.close()
+
+# Helper logic to generate a unique 4-digit token identifier
+def generate_4_digit_id():
+    conn = sqlite3.connect("permit_system.db")
+    cursor = conn.cursor()
+    while True:
+        potential_id = str(random.randint(1000, 9999))
+        cursor.execute("SELECT 1 FROM applications WHERE tracking_id = ?", (potential_id,))
+        if not cursor.fetchone():
+            conn.close()
+            return potential_id
 
 # --- USER CORE LOGIC ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -179,23 +188,27 @@ async def get_boq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     elec_id = context.user_data.get('elec_file_id')
     found_id = context.user_data.get('found_file_id')
     boq_id = context.user_data.get('boq_file_id')
+    
+    # Generate random unique 4-digit tracking value
+    tracking_id = generate_4_digit_id()
 
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
     try:
         cursor.execute("""
-            INSERT OR REPLACE INTO applications (
-                user_id, full_name, phone, arch_file_id, struct_file_id, elec_file_id, found_file_id, boq_file_id, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Under Review')
-        """, (user_id, full_name, phone, arch_id, struct_id, elec_id, found_id, boq_id))
+            INSERT INTO applications (
+                tracking_id, user_id, full_name, phone, arch_file_id, struct_file_id, elec_file_id, found_file_id, boq_file_id, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Under Review')
+        """, (tracking_id, user_id, full_name, phone, arch_id, struct_id, elec_id, found_id, boq_id))
         conn.commit()
         await update.message.reply_text(
-            "✅ Success! All 5 required architectural and structural engineering design files have been securely submitted to the Engineering Department.\n"
-            "You will receive a notification here as soon as a review decision is made."
+            f"✅ **Success!** All 5 design files have been securely submitted to the Engineering Department.\n\n"
+            f"🎫 Your 4-Digit Application tracking ID is: **{tracking_id}**\n"
+            f"Keep this ID handy. You will receive an alert here when a decision is recorded."
         )
     except Exception as e:
-        logger.error(f"Database error during multi-file upload save operations: {e}")
-        await update.message.reply_text("❌ System error saving your files to the database. Please try running /start to re-submit.")
+        logger.error(f"Database error during insert tracking operations: {e}")
+        await update.message.reply_text("❌ System error saving your files. Please try running /start to re-submit.")
     finally:
         conn.close()
 
@@ -214,7 +227,8 @@ async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, full_name, status FROM applications WHERE status = 'Under Review'")
+    # Pull ALL rows marked Under Review
+    cursor.execute("SELECT tracking_id, full_name FROM applications WHERE status = 'Under Review'")
     apps = cursor.fetchall()
     conn.close()
 
@@ -222,44 +236,44 @@ async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📁 No pending applications require review right now.")
         return
 
-    msg = "📋 **Pending Applications under Review:**\n\n"
+    msg = "📋 **Pending Applications Queue:**\n"
+    msg += "━━━━━━━━━━━━━━━━━━━\n"
     for app_item in apps:
-        msg += f"👤 **Name:** {app_item[1]} \n🆔 **Review ID:** `{app_item[0]}`\n\n"
-    msg += "To review an applicant's complete 5 files, copy their **Review ID** number and type:\n`/view <Review ID>`"
+        msg += f"🆔 **ID:** `{app_item[0]}` │ 👤 **Name:** {app_item[1]}\n"
+    msg += "━━━━━━━━━━━━━━━━━━━\n"
+    msg += "To review an applicant's complete files package, type:\n`/view <4-Digit ID>`"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Please specify a Review ID. Usage: `/view 123456789`")
+        await update.message.reply_text("Please specify a 4-digit ID. Usage: `/view 1234`")
         return
 
-    target_user_id = context.args[0]
+    target_tracking_id = context.args[0]
 
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
     cursor.execute("""
         SELECT user_id, full_name, phone, arch_file_id, struct_file_id, elec_file_id, found_file_id, boq_file_id, status 
-        FROM applications WHERE user_id = ?
-    """, (target_user_id,))
+        FROM applications WHERE tracking_id = ?
+    """, (target_tracking_id,))
     app_data = cursor.fetchone()
     conn.close()
 
     if not app_data:
-        await update.message.reply_text("❌ Application ID (User ID) not found in the system database.")
+        await update.message.reply_text("❌ That 4-digit application tracking ID was not found.")
         return
 
-    # Unpack all columns safely
     user_id, full_name, phone, arch, struct, elec, found, boq, status = app_data
 
     await update.message.reply_text(
-        f"📝 **Reviewing Complete Application Package**\n"
+        f"📝 **Reviewing Package ID: #{target_tracking_id}**\n"
         f"👤 **Name:** {full_name}\n"
         f"📞 **Phone:** {phone}\n"
         f"🚦 **Current Status:** {status}\n\n"
-        f"⏳ *Sending all 5 design files for evaluation now...*"
+        f"⏳ *Delivering files package...*"
     )
 
-    # File types label list to loop through cleanly
     files_to_send = [
         ("1️⃣ Architectural Drawings", arch),
         ("2️⃣ Structural Drawings", struct),
@@ -268,28 +282,25 @@ async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("5️⃣ Bill of Quantities (BoQ)", boq)
     ]
 
-    # Loop and deliver every document cleanly to the admin chat window
     for label, file_id in files_to_send:
         if file_id:
             try:
                 await context.bot.send_document(chat_id=update.effective_chat.id, document=file_id, caption=label)
-                await asyncio.sleep(0.5) # Avoid hitting Telegram rate limits
+                await asyncio.sleep(0.4)
             except Exception as e:
-                logger.error(f"Error sending {label}: {e}")
-                await update.message.reply_text(f"⚠️ Could not display {label} file link.")
+                logger.error(f"Error sending file: {e}")
 
-    # Render decision management layout buttons below the files
     keyboard = [
         [
-            InlineKeyboardButton("✅ Approve Application", callback_data=f"status_Approved_{user_id}"),
-            InlineKeyboardButton("❌ Reject Application", callback_data=f"status_Rejected_{user_id}")
+            InlineKeyboardButton("✅ Approve", callback_data=f"status_Approved_{target_tracking_id}_{user_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"status_Rejected_{target_tracking_id}_{user_id}")
         ],
         [
-            InlineKeyboardButton("⏳ Keep Under Review", callback_data=f"status_Under Review_{user_id}")
+            InlineKeyboardButton("⏳ Keep Under Review", callback_data=f"status_Under Review_{target_tracking_id}_{user_id}")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("🏁 **Engineering Dept Evaluation Decision Menu:**", reply_markup=reply_markup)
+    await update.message.reply_text(f"🏁 **Evaluation Action for Application #{target_tracking_id}:**", reply_markup=reply_markup)
 
 async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -297,27 +308,29 @@ async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     data_parts = query.data.split("_")
     new_status = data_parts[1]
-    target_user = data_parts[2]
+    tracking_id = data_parts[2]
+    target_user = data_parts[3]
 
     if new_status == "Rejected":
         context.user_data['admin_state'] = 'WAITING_REJECTION_COMMENT'
+        context.user_data['handling_rejection_tracking_id'] = tracking_id
         context.user_data['handling_rejection_user_id'] = target_user
         
-        await query.edit_message_text(text="⚠️ **Status set to Rejected.**\nNow, type the reason for rejection directly into this chat:")
+        await query.edit_message_text(text=f"⚠️ **Application #{tracking_id} set to Rejected.**\nType the reason for rejection directly into this chat:")
         return
 
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    cursor.execute("UPDATE applications SET status = ?, admin_comments = 'None' WHERE user_id = ?", (new_status, target_user))
+    cursor.execute("UPDATE applications SET status = ?, admin_comments = 'None' WHERE tracking_id = ?", (new_status, tracking_id))
     conn.commit()
     conn.close()
 
-    await query.edit_message_text(text=f"🔒 **Decision Registered:** Application has been set to **{new_status}**.")
+    await query.edit_message_text(text=f"🔒 **Decision Registered:** Application #{tracking_id} has been set to **{new_status}**.")
 
     try:
         await context.bot.send_message(
             chat_id=int(target_user),
-            text=f"🔔 **Permit Review Update Notification!**\n\nYour permit application status has been updated to: **{new_status}**."
+            text=f"🔔 **Permit Review Update Notification!**\n\nYour permit application structure **#{tracking_id}** status has been updated to: **{new_status}**."
         )
     except Exception as e:
         logger.error(f"Could not alert user: {e}")
@@ -325,23 +338,24 @@ async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # --- GLOBAL TEXT INTERCEPTOR ROUTER ---
 async def handle_global_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('admin_state') == 'WAITING_REJECTION_COMMENT':
+        tracking_id = context.user_data.get('handling_rejection_tracking_id')
         target_user = context.user_data.get('handling_rejection_user_id')
         comment_text = update.message.text
 
         conn = sqlite3.connect("permit_system.db")
         cursor = conn.cursor()
-        cursor.execute("UPDATE applications SET status = 'Rejected', admin_comments = ? WHERE user_id = ?", (comment_text, target_user))
+        cursor.execute("UPDATE applications SET status = 'Rejected', admin_comments = ? WHERE tracking_id = ?", (comment_text, tracking_id))
         conn.commit()
         conn.close()
 
         context.user_data.clear() 
 
-        await update.message.reply_text(f"✅ Rejection reason logged successfully for User ID: {target_user}.")
+        await update.message.reply_text(f"✅ Rejection reason logged successfully for Application #{tracking_id}.")
 
         try:
             await context.bot.send_message(
                 chat_id=int(target_user),
-                text=f"❌ **Permit Application Update: REJECTED**\n\n"
+                text=f"❌ **Permit Application Update: REJECTED (ID: #{tracking_id})**\n\n"
                      f"**Reason/Comments from Engineering Dept:**\n> {comment_text}\n\n"
                      f"Please correct these issues and use /start to re-submit your files."
             )
