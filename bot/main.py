@@ -47,13 +47,11 @@ def run_health_server():
     logger.info(f"🌍 Fake web server listening on port {port} to satisfy Render...")
     httpd.serve_forever()
 
-# --- DATABASE LAYER ---
+# --- DATABASE LAYER (SAFE & PERSISTENT) ---
 def init_db():
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    
-    # Always drop and recreate the table to avoid structural conflicts with columns
-    cursor.execute("DROP TABLE IF EXISTS applications")
+    # Safely creates the schema without erasing your data during server reboots
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS applications (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,7 +88,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return FULL_NAME
 
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # Protect conversation flow from being disrupted by unexpected admin states
     if context.user_data.get('admin_state') in ['WAITING_REJECTION_COMMENT', 'WAITING_ENGINEER_NAME', 'WAITING_ENGINEER_PHONE']:
         await handle_global_text(update, context)
         return ConversationHandler.END
@@ -191,37 +188,60 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("❌ Registration cancelled.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
-# --- ADMINISTRATIVE REVIEW LOGIC ---
+# --- ADMINISTRATIVE CONTROL PANEL ---
 async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or context.args[0] != "Semera2026":
         await update.message.reply_text("❌ Unauthorized dashboard password.")
         return
 
+    keyboard = [
+        [
+            InlineKeyboardButton("📁 View Pending Queue", callback_data="nav_pending"),
+            InlineKeyboardButton("📜 View Past Applications", callback_data="nav_past")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("🎛️ **Semera Logiya Engineering Management Console**\nSelect a collection to filter records:", reply_markup=reply_markup)
+
+async def admin_navigation_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    nav_target = query.data.split("_")[1]
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT tracking_id, full_name, doc_type FROM applications WHERE status = 'Under Review'")
-    apps = cursor.fetchall()
+    
+    if nav_target == "pending":
+        cursor.execute("SELECT tracking_id, full_name, doc_type FROM applications WHERE status = 'Under Review'")
+        apps = cursor.fetchall()
+        title_header = "📁 **Current Pending Queue (Under Review):**\n"
+    else:
+        cursor.execute("SELECT tracking_id, full_name, doc_type, status FROM applications WHERE status != 'Under Review'")
+        apps = cursor.fetchall()
+        title_header = "📜 **Historical Applications Log:**\n"
+        
     conn.close()
 
     if not apps:
-        await update.message.reply_text("📁 The pending queue is completely clear.")
+        await query.edit_message_text(text=f"{title_header}━━━━━━━━━━━━━━━━━━━\n🟩 The requested log folder is empty.\n━━━━━━━━━━━━━━━━━━━")
         return
 
-    msg = "📋 **Pending Permit Applications:**\n"
+    msg = title_header
     msg += "━━━━━━━━━━━━━━━━━━━\n"
     for app_item in apps:
-        msg += f"🆔 **ID:** `{app_item[0]}` │ 👤 **Name:** {app_item[1]} │ 📂 **Type:** {app_item[2]}\n"
+        if nav_target == "pending":
+            msg += f"🆔 `/{app_item[0]}` │ 👤 {app_item[1]} │ 📐 {app_item[2]}\n"
+        else:
+            msg += f"🆔 `/{app_item[0]}` │ 👤 {app_item[1]} [{app_item[3]}]\n"
     msg += "━━━━━━━━━━━━━━━━━━━\n"
-    msg += "To look up a file entry, type:\n`/view <4-Digit ID>`"
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    msg += "💡 *Tip: Click or type the blue command number directly (e.g. /1234) to open and inspect that specific document entry.*"
+    
+    await query.edit_message_text(text=msg, parse_mode="Markdown")
 
-async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Please provide a search tracking ID. Usage: `/view 1234`")
-        return
-
-    target_tracking_id = context.args[0]
-
+async def admin_view_shortcut(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Strips the leading slash from the message command shortcut to read the raw ID values
+    target_tracking_id = update.message.text.replace("/", "").strip()
+    
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
     cursor.execute("SELECT user_id, full_name, phone, doc_type, file_id, status FROM applications WHERE tracking_id = ?", (target_tracking_id,))
@@ -363,8 +383,10 @@ citizen_handler = ConversationHandler(
 )
 
 application.add_handler(CommandHandler("review", admin_review))
-application.add_handler(CommandHandler("view", admin_view_app))
+application.add_handler(CallbackQueryHandler(admin_navigation_click, pattern="^nav_"))
 application.add_handler(CallbackQueryHandler(admin_button_click, pattern="^status_"))
+# Handles dynamic commands like /1234 to pull database contents automatically
+application.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r'^/\d{4}$'), admin_view_app_shortcut))
 
 application.add_handler(citizen_handler)
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_global_text))
