@@ -24,7 +24,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Registration States
-CHOOSE_DOC, UPLOAD_SINGLE_DOC = range(2)
+FULL_NAME, PHONE_NUMBER, CHOOSE_DOC, UPLOAD_SINGLE_DOC = range(4)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "7978291878:AAGL1uWtkWgvj9vf91kySu_kZkuk3Abm6nY").strip()
 
@@ -51,23 +51,22 @@ def run_health_server():
 def init_db():
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    cursor.execute("PRAGMA table_info(applications)")
-    columns = [col[1] for col in cursor.fetchall()]
     
-    # Rebuild a clean, streamlined schema for single-choice tracking
-    if "doc_type" not in columns:
-        cursor.execute("DROP TABLE IF EXISTS applications")
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS applications (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tracking_id TEXT UNIQUE,
-                user_id INTEGER,
-                doc_type TEXT,
-                file_id TEXT,
-                status TEXT DEFAULT 'Under Review',
-                admin_comments TEXT DEFAULT 'None'
-            )
-        """)
+    # Always drop and recreate the table to avoid structural conflicts with columns
+    cursor.execute("DROP TABLE IF EXISTS applications")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS applications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tracking_id TEXT UNIQUE,
+            user_id INTEGER,
+            full_name TEXT,
+            phone TEXT,
+            doc_type TEXT,
+            file_id TEXT,
+            status TEXT DEFAULT 'Under Review',
+            admin_comments TEXT DEFAULT 'None'
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -84,6 +83,28 @@ def generate_4_digit_id():
 # --- USER CORE LOGIC ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
+    await update.message.reply_text(
+        "👋 Welcome to the Semera Logiya Municipality Building Permit Bot.\n\n"
+        "Let's create your submission profile first. Please type your **Full Name**:"
+    )
+    return FULL_NAME
+
+async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Protect conversation flow from being disrupted by unexpected admin states
+    if context.user_data.get('admin_state') in ['WAITING_REJECTION_COMMENT', 'WAITING_ENGINEER_NAME', 'WAITING_ENGINEER_PHONE']:
+        await handle_global_text(update, context)
+        return ConversationHandler.END
+
+    context.user_data['full_name'] = update.message.text
+    await update.message.reply_text("Thank you! Now, please enter your **Phone Number**:")
+    return PHONE_NUMBER
+
+async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if context.user_data.get('admin_state') in ['WAITING_REJECTION_COMMENT', 'WAITING_ENGINEER_NAME', 'WAITING_ENGINEER_PHONE']:
+        await handle_global_text(update, context)
+        return ConversationHandler.END
+
+    context.user_data['phone'] = update.message.text
     
     keyboard = [
         [InlineKeyboardButton("📐 Architectural Drawings", callback_data="doc_Architectural Drawings")],
@@ -95,8 +116,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "👋 Welcome to the Semera Logiya Municipality Building Permit Bot.\n\n"
-        "Please select the **one document** you want to submit for review today:",
+        f"📝 **Profile Details Captured:**\n"
+        f"👤 Name: {context.user_data['full_name']}\n"
+        f"📞 Phone: {context.user_data['phone']}\n\n"
+        f"Please select the **one document** you want to attach to this application profile:",
         reply_markup=reply_markup
     )
     return CHOOSE_DOC
@@ -109,7 +132,7 @@ async def handle_doc_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.user_data['chosen_doc_type'] = chosen_doc
     
     await query.edit_message_text(
-        text=f"📂 You selected: **{chosen_doc}**\n\nPlease upload or attach your document file (PDF or Image) now:"
+        text=f"📂 You selected: **{chosen_doc}**\n\nPlease upload or attach your file (PDF or Image) directly now:"
     )
     return UPLOAD_SINGLE_DOC
 
@@ -129,9 +152,11 @@ def extract_file_id(message):
 async def handle_single_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     file_id = extract_file_id(update.message)
     if not file_id:
-        await update.message.reply_text("❌ Invalid format. Please upload your document file directly:")
+        await update.message.reply_text("❌ Invalid file format. Please upload your document file directly:")
         return UPLOAD_SINGLE_DOC
     
+    full_name = context.user_data.get('full_name', 'Unknown')
+    phone = context.user_data.get('phone', 'Unknown')
     doc_type = context.user_data.get('chosen_doc_type')
     user_id = update.message.from_user.id
     tracking_id = generate_4_digit_id()
@@ -140,20 +165,22 @@ async def handle_single_upload(update: Update, context: ContextTypes.DEFAULT_TYP
     cursor = conn.cursor()
     try:
         cursor.execute("""
-            INSERT INTO applications (tracking_id, user_id, doc_type, file_id, status)
-            VALUES (?, ?, ?, ?, 'Under Review')
-        """, (tracking_id, user_id, doc_type, file_id))
+            INSERT INTO applications (tracking_id, user_id, full_name, phone, doc_type, file_id, status)
+            VALUES (?, ?, ?, ?, ?, ?, 'Under Review')
+        """, (tracking_id, user_id, full_name, phone, doc_type, file_id))
         conn.commit()
         
         await update.message.reply_text(
-            f"✅ **Submission Success!** Your document has been delivered safely.\n\n"
-            f"📋 **Document Type:** {doc_type}\n"
+            f"✅ **Submission Successful!** Your application has been logged.\n\n"
+            f"👤 **Applicant Name:** {full_name}\n"
+            f"📞 **Phone Number:** {phone}\n"
+            f"📋 **Document Category:** {doc_type}\n"
             f"🎫 **Tracking ID:** `{tracking_id}`\n\n"
-            f"You will be instantly notified here when an engineer evaluates this file."
+            f"The engineering department will notify you directly here once evaluated."
         )
     except Exception as e:
-        logger.error(f"Save error: {e}")
-        await update.message.reply_text("❌ System error saving your file. Type /start to try again.")
+        logger.error(f"Database save error: {e}")
+        await update.message.reply_text("❌ An unexpected database error occurred. Type /start to try again.")
     finally:
         conn.close()
 
@@ -161,54 +188,58 @@ async def handle_single_upload(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
-    await update.message.reply_text("❌ Process cancelled.", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("❌ Registration cancelled.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 # --- ADMINISTRATIVE REVIEW LOGIC ---
 async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or context.args[0] != "Semera2026":
-        await update.message.reply_text("❌ Unauthorized. Usage: `/review Semera2026`")
+        await update.message.reply_text("❌ Unauthorized dashboard password.")
         return
 
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT tracking_id, doc_type FROM applications WHERE status = 'Under Review'")
+    cursor.execute("SELECT tracking_id, full_name, doc_type FROM applications WHERE status = 'Under Review'")
     apps = cursor.fetchall()
     conn.close()
 
     if not apps:
-        await update.message.reply_text("📁 No pending applications require review right now.")
+        await update.message.reply_text("📁 The pending queue is completely clear.")
         return
 
-    msg = "📋 **Pending Applications Queue:**\n"
+    msg = "📋 **Pending Permit Applications:**\n"
     msg += "━━━━━━━━━━━━━━━━━━━\n"
     for app_item in apps:
-        msg += f"🆔 **ID:** `{app_item[0]}` │ 📂 **Type:** {app_item[1]}\n"
+        msg += f"🆔 **ID:** `{app_item[0]}` │ 👤 **Name:** {app_item[1]} │ 📂 **Type:** {app_item[2]}\n"
     msg += "━━━━━━━━━━━━━━━━━━━\n"
-    msg += "To review a file entry, type:\n`/view <4-Digit ID>`"
+    msg += "To look up a file entry, type:\n`/view <4-Digit ID>`"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Please specify an ID. Usage: `/view 1234`")
+        await update.message.reply_text("Please provide a search tracking ID. Usage: `/view 1234`")
         return
 
     target_tracking_id = context.args[0]
 
     conn = sqlite3.connect("permit_system.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, doc_type, file_id, status FROM applications WHERE tracking_id = ?", (target_tracking_id,))
+    cursor.execute("SELECT user_id, full_name, phone, doc_type, file_id, status FROM applications WHERE tracking_id = ?", (target_tracking_id,))
     app_data = cursor.fetchone()
     conn.close()
 
     if not app_data:
-        await update.message.reply_text("❌ Tracking ID not found.")
+        await update.message.reply_text("❌ Tracking ID could not be found.")
         return
 
-    user_id, doc_type, file_id, status = app_data
+    user_id, full_name, phone, doc_type, file_id, status = app_data
 
     await update.message.reply_text(
-        f"📝 **Reviewing ID: #{target_tracking_id}**\n📂 **Document Class:** {doc_type}\n🚦 **Status:** {status}"
+        f"🔍 **Reviewing ID:** #{target_tracking_id}\n\n"
+        f"👤 **Applicant Name:** {full_name}\n"
+        f"📞 **Applicant Phone:** {phone}\n"
+        f"📂 **Document Type:** {doc_type}\n"
+        f"🚦 **Application Status:** {status}"
     )
 
     keyboard = [
@@ -224,11 +255,11 @@ async def admin_view_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_document(
                 chat_id=update.effective_chat.id, 
                 document=file_id, 
-                caption=f"Attached file for Application #{target_tracking_id}",
+                caption=f"Attachment File for Application #{target_tracking_id}",
                 reply_markup=reply_markup
             )
         except Exception:
-            await update.message.reply_text("Action evaluation choices:", reply_markup=reply_markup)
+            await update.message.reply_text("Action selection panel:", reply_markup=reply_markup)
 
 async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -322,6 +353,8 @@ async def handle_global_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
 citizen_handler = ConversationHandler(
     entry_points=[CommandHandler("start", start)],
     states={
+        FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
+        PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
         CHOOSE_DOC: [CallbackQueryHandler(handle_doc_choice, pattern="^doc_")],
         UPLOAD_SINGLE_DOC: [MessageHandler(filters.ALL & ~filters.COMMAND, handle_single_upload)],
     },
