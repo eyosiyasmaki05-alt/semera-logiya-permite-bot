@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Registration States
 CHOOSE_DOC, UPLOAD_SINGLE_DOC = range(2)
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "7978291878:AAF0n9kf1InCL_OqzKD-Ar6FclAZ4Ug-n9I").strip()
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "7978291878:AAGL1uWtkWgvj9vf91kySu_kZkuk3Abm6nY").strip()
 
 custom_request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
 application = Application.builder().token(TOKEN).request(custom_request).build()
