@@ -385,8 +385,8 @@ citizen_handler = ConversationHandler(
 application.add_handler(CommandHandler("review", admin_review))
 application.add_handler(CallbackQueryHandler(admin_navigation_click, pattern="^nav_"))
 application.add_handler(CallbackQueryHandler(admin_button_click, pattern="^status_"))
-# Handles dynamic commands like /1234 to pull database contents automatically
-application.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r'^/\d{4}$'), admin_view_app_shortcut))
+# FIXED: Points to the correct function name 'admin_view_shortcut'
+application.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r'^/\d{4}$'), admin_view_shortcut))
 
 application.add_handler(citizen_handler)
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_global_text))
